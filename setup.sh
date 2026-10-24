@@ -15,9 +15,11 @@ require_command systemctl
 require_command base64
 require_command tac
 require_command flock
+require_command awk
+require_command paste
 
 nmcli general status >/dev/null 2>&1 || die "NetworkManager is not available."
-systemctl is-active --quiet systemd-resolved || die "systemd-resolved must be active for encrypted DNS. No changes were made."
+systemctl is-active --quiet systemd-resolved || die "systemd-resolved must be active for Quad9 DNS-over-TLS. No changes were made."
 
 acquire_lock
 
@@ -25,8 +27,13 @@ if sudo test -e "$STATE_DIR"; then
     die "An existing rollback state was found. Run ./rollback.sh first; refusing to overwrite it."
 fi
 
-# No changes have been made before this point. If backup creation fails,
-# leave the system untouched instead of attempting a partial rollback.
+# Never replace an unrelated file at the path owned by this project.
+if sudo test -e "$CONFIG_FILE" &&
+   ! sudo grep -q '^# Managed by Arch Privacy Setup\.$' "$CONFIG_FILE"; then
+    die "$CONFIG_FILE already exists and is not marked as managed by this project. No changes were made."
+fi
+
+# Record all state before the first system change.
 state_init
 state_backup_config
 
@@ -42,20 +49,54 @@ on_interrupt() {
 }
 trap on_interrupt INT TERM
 
-log "Applying NetworkManager-native MAC privacy..."
+log "Enabling NetworkManager Wi-Fi MAC randomization..."
 configure_mac_profiles
 
-log "Applying Wi-Fi scan privacy, encrypted Quad9 DNS, DHCP privacy, IPv6 privacy, and local discovery hardening..."
+log "Configuring Quad9 DNS-over-TLS for Wi-Fi profiles..."
 configure_scan_privacy
 configure_connection_privacy
 
 sudo nmcli general reload conf >/dev/null
 
-log "Running read-only verification..."
-"$ROOT/audit.sh"
+# Verify saved profile configuration. This does not claim to prove live packet
+# routing; reconnect to activate settings and use resolvectl/dig to test DNS.
+while IFS=: read -r uuid type; do
+    [ -n "$uuid" ] || continue
+    [ "$type" = "802-11-wireless" ] || continue
 
-log "Privacy setup applied."
-log "Active connections were not forcibly restarted."
-log "Reconnection/reboot is required for connection-activation settings to fully take effect."
-log "If networking becomes unusable, run: ./rollback.sh"
-log "Phase implementation complete; real hardware validation remains."
+    mac="$(nmcli -g 802-11-wireless.cloned-mac-address connection show "$uuid")"
+    dns4="$(nmcli -g ipv4.dns connection show "$uuid" | awk 'NF' | paste -sd, -)"
+    dns6="$(nmcli -g ipv6.dns connection show "$uuid" | awk 'NF' | paste -sd, -)"
+    dot="$(nmcli -g connection.dns-over-tls connection show "$uuid")"
+    dnssec="$(nmcli -g connection.dnssec connection show "$uuid")"
+
+    if [ "$mac" != "random" ]; then
+        warn "MAC setting verification failed for Wi-Fi profile $uuid."
+        rollback_on_error
+        trap - ERR
+        exit 1
+    fi
+    if [[ "$dns4" != *"9.9.9.9#dns.quad9.net"* || "$dns4" != *"149.112.112.112#dns.quad9.net"* ]]; then
+        warn "IPv4 Quad9 verification failed for Wi-Fi profile $uuid."
+        rollback_on_error
+        trap - ERR
+        exit 1
+    fi
+    if [[ "$dns6" != *"2620:fe::fe#dns.quad9.net"* || "$dns6" != *"2620:fe::9#dns.quad9.net"* ]]; then
+        warn "IPv6 Quad9 verification failed for Wi-Fi profile $uuid."
+        rollback_on_error
+        trap - ERR
+        exit 1
+    fi
+    if [ "$dot" != "yes" ] || [ "$dnssec" != "yes" ]; then
+        warn "DNS-over-TLS/DNSSEC verification failed for Wi-Fi profile $uuid."
+        rollback_on_error
+        trap - ERR
+        exit 1
+    fi
+done < <(nmcli -t -f UUID,TYPE connection show)
+
+log "Settings applied and profile configuration verified."
+log "Reconnect to Wi-Fi for the connection MAC and DNS settings to take effect."
+log "If connectivity breaks, run: ./rollback.sh"
+log "Live DNS routing and hardware behavior still need to be checked on this machine."
