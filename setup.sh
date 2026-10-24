@@ -70,11 +70,30 @@ while IFS=: read -r uuid type; do
     dot="$(nmcli -g connection.dns-over-tls connection show "$uuid")"
     dnssec="$(nmcli -g connection.dnssec connection show "$uuid")"
 
-    [ "$mac" = "random" ] || die "MAC setting verification failed for Wi-Fi profile $uuid."
-    [[ "$dns4" == *"9.9.9.9#dns.quad9.net"* && "$dns4" == *"149.112.112.112#dns.quad9.net"* ]] || die "IPv4 Quad9 verification failed for Wi-Fi profile $uuid."
-    [[ "$dns6" == *"2620:fe::fe#dns.quad9.net"* && "$dns6" == *"2620:fe::9#dns.quad9.net"* ]] || die "IPv6 Quad9 verification failed for Wi-Fi profile $uuid."
-    [ "$dot" = "yes" ] || die "DNS-over-TLS verification failed for Wi-Fi profile $uuid."
-    [ "$dnssec" = "yes" ] || die "DNSSEC verification failed for Wi-Fi profile $uuid."
+    if [ "$mac" != "random" ]; then
+        warn "MAC setting verification failed for Wi-Fi profile $uuid."
+        rollback_on_error
+        trap - ERR
+        exit 1
+    fi
+    if [[ "$dns4" != *"9.9.9.9#dns.quad9.net"* || "$dns4" != *"149.112.112.112#dns.quad9.net"* ]]; then
+        warn "IPv4 Quad9 verification failed for Wi-Fi profile $uuid."
+        rollback_on_error
+        trap - ERR
+        exit 1
+    fi
+    if [[ "$dns6" != *"2620:fe::fe#dns.quad9.net"* || "$dns6" != *"2620:fe::9#dns.quad9.net"* ]]; then
+        warn "IPv6 Quad9 verification failed for Wi-Fi profile $uuid."
+        rollback_on_error
+        trap - ERR
+        exit 1
+    fi
+    if [ "$dot" != "yes" ] || [ "$dnssec" != "yes" ]; then
+        warn "DNS-over-TLS/DNSSEC verification failed for Wi-Fi profile $uuid."
+        rollback_on_error
+        trap - ERR
+        exit 1
+    fi
 done < <(nmcli -t -f UUID,TYPE connection show)
 
 log "Settings applied and profile configuration verified."
