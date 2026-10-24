@@ -27,7 +27,8 @@ CONF
 
     if ! sudo install -m 0644 "$tmp" "$file"; then
         rm -f "$tmp"
-        die "Could not install NetworkManager Wi-Fi privacy configuration."
+        warn "Could not install NetworkManager Wi-Fi privacy configuration."
+        return 1
     fi
     rm -f "$tmp"
 }
